@@ -136,11 +136,48 @@ class InMemoryGraphStore(GraphStore):
             self._relationships = [
                 r for r in self._relationships if r.source_id != node_id and r.target_id != node_id
             ]
+            # Prune orphan entity nodes
+            connected_ids = {r.source_id for r in self._relationships} | {r.target_id for r in self._relationships}
+            orphan_ids = [
+                nid for nid, node in self._nodes.items()
+                if node.node_type == "ENTITY" and nid not in connected_ids
+            ]
+            for orphan_id in orphan_ids:
+                del self._nodes[orphan_id]
             return True
         return False
 
+    def clear(self) -> None:
+        self._nodes.clear()
+        self._relationships.clear()
+
     def add_relationship(self, relationship: Relationship) -> None:
-        self._relationships.append(relationship)
+        src_id = relationship.source_id
+        tgt_id = relationship.target_id
+        rel_type = relationship.relation_type
+        if rel_type in ("CO_OCCURS_WITH", "SIMILAR_TO") and src_id > tgt_id:
+            src_id, tgt_id = tgt_id, src_id
+
+        norm_rel = Relationship(
+            id=relationship.id,
+            source_id=src_id,
+            target_id=tgt_id,
+            relation_type=rel_type,
+            confidence=relationship.confidence,
+            evidence_text=relationship.evidence_text,
+            properties=relationship.properties,
+            metadata=relationship.metadata,
+        )
+
+        for idx, existing in enumerate(self._relationships):
+            if (
+                existing.source_id == src_id
+                and existing.target_id == tgt_id
+                and existing.relation_type == rel_type
+            ):
+                self._relationships[idx] = norm_rel
+                return
+        self._relationships.append(norm_rel)
 
     def delete_relationship(
         self,

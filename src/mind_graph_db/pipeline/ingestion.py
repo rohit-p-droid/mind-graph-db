@@ -1,9 +1,10 @@
 """Document ingestion pipeline automating storage, vector indexing, NLP analysis, entity resolution, and graph discovery."""
 
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pydantic import BaseModel, Field
 
-from mind_graph_db.core.types import Document, GraphNode, Relationship
+from mind_graph_db.core.types import Document, GraphNode, ProvenanceRecord, Relationship, RelationshipKind
 from mind_graph_db.interfaces.document_store import DocumentStore
 from mind_graph_db.interfaces.embedding import EmbeddingModel
 from mind_graph_db.interfaces.graph_store import GraphStore
@@ -103,6 +104,8 @@ class DocumentIngestionPipeline:
 
         # Step 5: Entity Resolution & Document MENTIONS Edges
         resolved_entities: Dict[str, str] = {}  # Map clean entity name -> entity node ID
+        sentences = [s.strip() for s in re.split(r"[.!?]\s+", document.text) if s.strip()]
+
         for entity in semantic_result.entities:
             clean_name = entity.name.strip()
             existing_node = self.graph_store.get_node_by_label(clean_name, node_type="ENTITY")
@@ -120,17 +123,34 @@ class DocumentIngestionPipeline:
 
             resolved_entities[clean_name.lower()] = ent_id
 
-            # Create MENTIONS edge from DOCUMENT to ENTITY with evidence text
+            # Find supporting sentence in document text
+            supporting_sentence = next(
+                (s for s in sentences if clean_name.lower() in s.lower()),
+                document.text,
+            )
+            char_start = document.text.lower().find(clean_name.lower())
+            char_span = (char_start, char_start + len(clean_name)) if char_start != -1 else None
+
+            prov = ProvenanceRecord(
+                kind=RelationshipKind.EXPLICIT,
+                source_doc_id=doc_id,
+                evidence_text=supporting_sentence,
+                char_span=char_span,
+                confidence=1.0,
+                method="nlp_explicit_extraction",
+            )
+
+            # Create explicit MENTIONS edge with 1.0 confidence and sentence provenance
             mentions_edge = Relationship(
                 source_id=doc_id,
                 target_id=ent_id,
                 relation_type="MENTIONS",
                 confidence=1.0,
-                evidence_text=f"Document '{doc_id}' explicitly mentions entity '{clean_name}'",
+                evidence_text=f"Document '{doc_id}' explicitly mentions entity '{clean_name}' in sentence: '{supporting_sentence}'",
+                provenance=prov,
             )
             self.graph_store.add_relationship(mentions_edge)
             rel_created_count += 1
-
 
         # Step 6: Vector Candidate Discovery (avoiding O(N) full DB search)
         vector_candidates = self.vector_store.search(
@@ -147,6 +167,13 @@ class DocumentIngestionPipeline:
 
             # Create SIMILAR_TO relationship if vector similarity meets threshold
             if sim_score >= self.min_confidence:
+                sim_prov = ProvenanceRecord(
+                    kind=RelationshipKind.SIMILAR_TO,
+                    source_doc_id=doc_id,
+                    evidence_text=f"Vector cosine similarity: {sim_score:.3f}",
+                    confidence=conf_score,
+                    method="vector_cosine_similarity",
+                )
                 sim_edge = Relationship(
                     source_id=doc_id,
                     target_id=cand_doc_id,
@@ -156,55 +183,50 @@ class DocumentIngestionPipeline:
                         f"Vector cosine similarity ({sim_score:.3f}) "
                         f"between doc '{doc_id}' and doc '{cand_doc_id}'"
                     ),
+                    provenance=sim_prov,
                 )
                 self.graph_store.add_relationship(sim_edge)
                 rel_created_count += 1
-
-            # Cross-document Entity Matching
-            cand_neighbors = self.graph_store.get_neighbors(cand_doc_id, relation_types=["MENTIONS"])
-            for cand_ent_node, _ in cand_neighbors:
-                cand_ent_name = cand_ent_node.label.lower()
-                if cand_ent_name in resolved_entities:
-                    matching_ent_id = resolved_entities[cand_ent_name]
-                    # Link candidate document to matching entity node
-                    cross_link = Relationship(
-                        source_id=cand_doc_id,
-                        target_id=matching_ent_id,
-                        relation_type="MENTIONS",
-                        confidence=conf_score,
-                        evidence_text=(
-                            f"Entity '{cand_ent_node.label}' resolved across vector similar doc '{cand_doc_id}' "
-                            f"(similarity={sim_score:.3f})"
-                        ),
-                    )
-                    self.graph_store.add_relationship(cross_link)
-                    rel_created_count += 1
 
 
         # Store intra-document relationship candidates meeting confidence threshold
         for candidate in semantic_result.relationship_candidates:
             if candidate.confidence >= self.min_confidence:
-                self.graph_store.add_node(
-                    GraphNode(
-                        id=candidate.source_entity.id,
-                        label=candidate.source_entity.name,
-                        node_type="ENTITY",
-                    )
-                )
-                self.graph_store.add_node(
-                    GraphNode(
-                        id=candidate.target_entity.id,
-                        label=candidate.target_entity.name,
-                        node_type="ENTITY",
-                    )
-                )
+                src_name = candidate.source_entity.name.strip()
+                tgt_name = candidate.target_entity.name.strip()
 
+                src_existing = self.graph_store.get_node_by_label(src_name, node_type="ENTITY")
+                if src_existing:
+                    src_id = src_existing.id
+                else:
+                    src_id = candidate.source_entity.id
+                    self.graph_store.add_node(
+                        GraphNode(id=src_id, label=src_name, node_type="ENTITY")
+                    )
+
+                tgt_existing = self.graph_store.get_node_by_label(tgt_name, node_type="ENTITY")
+                if tgt_existing:
+                    tgt_id = tgt_existing.id
+                else:
+                    tgt_id = candidate.target_entity.id
+                    self.graph_store.add_node(
+                        GraphNode(id=tgt_id, label=tgt_name, node_type="ENTITY")
+                    )
+
+                co_prov = ProvenanceRecord(
+                    kind=RelationshipKind.CO_OCCURS_WITH,
+                    source_doc_id=doc_id,
+                    evidence_text=candidate.evidence_text or f"Extracted from document '{doc_id}'",
+                    confidence=candidate.confidence,
+                    method="sentence_co_occurrence",
+                )
                 rel_edge = Relationship(
-                    source_id=candidate.source_entity.id,
-                    target_id=candidate.target_entity.id,
+                    source_id=src_id,
+                    target_id=tgt_id,
                     relation_type=candidate.relation_type,
                     confidence=candidate.confidence,
                     evidence_text=candidate.evidence_text or f"Extracted from document '{doc_id}'",
+                    provenance=co_prov,
                 )
                 self.graph_store.add_relationship(rel_edge)
                 rel_created_count += 1
@@ -318,29 +340,35 @@ class DocumentIngestionPipeline:
         # Intra-document candidates
         for candidate in semantic_result.relationship_candidates:
             if candidate.confidence >= self.min_confidence:
-                self.graph_store.add_node(
-                    GraphNode(
-                        id=candidate.source_entity.id,
-                        label=candidate.source_entity.name,
-                        node_type="ENTITY",
+                src_name = candidate.source_entity.name.strip()
+                tgt_name = candidate.target_entity.name.strip()
+
+                src_existing = self.graph_store.get_node_by_label(src_name, node_type="ENTITY")
+                if src_existing:
+                    src_id = src_existing.id
+                else:
+                    src_id = candidate.source_entity.id
+                    self.graph_store.add_node(
+                        GraphNode(id=src_id, label=src_name, node_type="ENTITY")
                     )
-                )
-                self.graph_store.add_node(
-                    GraphNode(
-                        id=candidate.target_entity.id,
-                        label=candidate.target_entity.name,
-                        node_type="ENTITY",
+
+                tgt_existing = self.graph_store.get_node_by_label(tgt_name, node_type="ENTITY")
+                if tgt_existing:
+                    tgt_id = tgt_existing.id
+                else:
+                    tgt_id = candidate.target_entity.id
+                    self.graph_store.add_node(
+                        GraphNode(id=tgt_id, label=tgt_name, node_type="ENTITY")
                     )
-                )
 
                 rel_edge = Relationship(
-                    source_id=candidate.source_entity.id,
-                    target_id=candidate.target_entity.id,
+                    source_id=src_id,
+                    target_id=tgt_id,
                     relation_type=candidate.relation_type,
                     confidence=candidate.confidence,
                     evidence_text=candidate.evidence_text or f"Extracted from updated document '{doc_id}'",
                 )
-                new_edges_map[(candidate.source_entity.id, candidate.target_entity.id, candidate.relation_type)] = rel_edge
+                new_edges_map[(src_id, tgt_id, candidate.relation_type)] = rel_edge
 
         # Step 6: Reconcile Graph Relationships (Prune Obsolete, Preserve Valid, Commit New)
         created_count = 0

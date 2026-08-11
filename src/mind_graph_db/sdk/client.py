@@ -4,8 +4,9 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from mind_graph_db.api.deps import DatabaseContainer, init_database
-from mind_graph_db.core.types import Document, QueryResult, TraversalPath
+from mind_graph_db.core.types import Document, QueryResult, Relationship, TraversalPath
 from mind_graph_db.pipeline import IngestionResult
+from mind_graph_db.utils.health import GraphHealthChecker, GraphHealthReport
 
 
 class MindGraphDBClient:
@@ -109,6 +110,52 @@ class MindGraphDBClient:
             self._container.graph_store.delete_node(document_id)
             return True
 
+    def list_documents(self, limit: int = 100, offset: int = 0) -> List[Document]:
+        """Retrieve a paginated list of all stored documents."""
+        if self._http_client:
+            resp = self._http_client.get(
+                "/api/v1/documents",
+                params={"limit": limit, "offset": offset},
+            )
+            resp.raise_for_status()
+            return [Document(**d) for d in resp.json()]
+        else:
+            assert self._container is not None
+            return self._container.document_store.list_documents(limit=limit, offset=offset)
+
+    def get_all_documents(self) -> List[Document]:
+        """Retrieve all documents stored in the database."""
+        return self.list_documents(limit=10000, offset=0)
+
+    def get_all(self) -> List[Document]:
+        """Retrieve all documents stored in the database (alias for get_all_documents)."""
+        return self.get_all_documents()
+
+    def delete_all_documents(self) -> int:
+        """Delete all documents, vectors, and graph nodes in the database."""
+        if self._http_client:
+            resp = self._http_client.delete("/api/v1/documents")
+            resp.raise_for_status()
+            data = resp.json()
+            return int(data.get("count", 0))
+        else:
+            assert self._container is not None
+            docs = self._container.document_store.list_documents(limit=10000)
+            count = len(docs)
+            for doc in docs:
+                self._container.document_store.delete(doc.id)
+                self._container.vector_store.delete(doc.id)
+            if hasattr(self._container.graph_store, "clear"):
+                self._container.graph_store.clear()
+            else:
+                for doc in docs:
+                    self._container.graph_store.delete_node(doc.id)
+            return count
+
+    def delete_all(self) -> int:
+        """Delete all documents, vectors, and graph nodes in the database (alias for delete_all_documents)."""
+        return self.delete_all_documents()
+
     def semantic_search(self, query_text: str, top_k: int = 10) -> List[Dict[str, Any]]:
         """Perform semantic similarity vector search."""
         if self._http_client:
@@ -160,6 +207,94 @@ class MindGraphDBClient:
         else:
             assert self._container is not None
             return self._container.graph_store.traverse(start_node_id, max_hops=max_hops)
+
+    def get_graph(self, start_node_ids: Optional[List[str]] = None, depth: int = 5) -> Dict[str, Any]:
+        """Retrieve graph nodes and relationships structure."""
+        if self._http_client:
+            resp = self._http_client.get("/api/v1/graph")
+            resp.raise_for_status()
+            return dict(resp.json())
+        else:
+            assert self._container is not None
+            subgraph = self._container.graph_store.query_subgraph(start_node_ids or [], depth=depth)
+            return {
+                "nodes": subgraph.get("nodes", []),
+                "relationships": subgraph.get("relationships", []),
+            }
+
+    def check_health(self) -> GraphHealthReport:
+        """Run automated graph health diagnostics, checking orphan nodes, provenance, and integrity."""
+        if self._http_client:
+            resp = self._http_client.get("/api/v1/health/graph")
+            resp.raise_for_status()
+            return GraphHealthReport(**resp.json())
+        else:
+            assert self._container is not None
+            return GraphHealthChecker.check_health(
+                self._container.graph_store,
+                self._container.document_store,
+            )
+
+    def validate_graph(self) -> GraphHealthReport:
+        """Alias for check_health()."""
+        return self.check_health()
+
+    def explain_relationship(self, relationship_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve the evidence provenance record and supporting context for a relationship ID."""
+        rels = self.get_relationships()
+        target_rel = next((r for r in rels if r.id == relationship_id), None)
+        if not target_rel:
+            return None
+
+        src_node = self._container.graph_store.get_node(target_rel.source_id) if self._container else None
+        tgt_node = self._container.graph_store.get_node(target_rel.target_id) if self._container else None
+
+        return {
+            "relationship_id": target_rel.id,
+            "source": src_node.label if src_node else target_rel.source_id,
+            "target": tgt_node.label if tgt_node else target_rel.target_id,
+            "relation_type": target_rel.relation_type,
+            "confidence": target_rel.confidence,
+            "evidence_text": target_rel.evidence_text,
+            "provenance": target_rel.provenance.model_dump(mode="json") if target_rel.provenance else None,
+        }
+
+    def find_contradictions(self) -> List[Dict[str, Any]]:
+        """Find contradictory relationships or conflicting facts in the knowledge graph."""
+        rels = self.get_relationships()
+        contradictions = []
+
+        for rel in rels:
+            is_contradict = (
+                rel.relation_type.upper() == "CONTRADICTS"
+                or (rel.provenance and str(rel.provenance.kind) in ("CONTRADICTS", "RelationshipKind.CONTRADICTS"))
+            )
+            if is_contradict:
+                src_node = self._container.graph_store.get_node(rel.source_id) if self._container else None
+                tgt_node = self._container.graph_store.get_node(rel.target_id) if self._container else None
+                contradictions.append({
+                    "relationship_id": rel.id,
+                    "source": src_node.label if src_node else rel.source_id,
+                    "target": tgt_node.label if tgt_node else rel.target_id,
+                    "relation_type": rel.relation_type,
+                    "confidence": rel.confidence,
+                    "evidence_text": rel.evidence_text,
+                    "provenance": rel.provenance.model_dump(mode="json") if rel.provenance else None,
+                })
+
+        return contradictions
+
+    def get_relationships(self, start_node_ids: Optional[List[str]] = None) -> List[Relationship]:
+        """Retrieve all graph relationships."""
+        if self._http_client:
+            resp = self._http_client.get("/api/v1/graph")
+            resp.raise_for_status()
+            raw_rels = resp.json().get("relationships", [])
+            return [Relationship(**r) for r in raw_rels]
+        else:
+            assert self._container is not None
+            subgraph = self._container.graph_store.query_subgraph(start_node_ids or [], depth=5)
+            return list(subgraph.get("relationships", []))
 
     def get_relationship_evidence(self, relationship_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve relationship provenance evidence."""

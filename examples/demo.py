@@ -1,125 +1,100 @@
-"""End-to-End Demonstration Script for Mind Graph DB."""
+"""Demonstration script using MindGraphDBClient SDK for data operations."""
 
 import os
 import shutil
-from pathlib import Path
-
-from mind_graph_db.core.types import Document
-from mind_graph_db.embeddings import HashEmbeddingModel
-from mind_graph_db.nlp import RuleBasedNLPModel
-from mind_graph_db.pipeline import DocumentIngestionPipeline
-from mind_graph_db.query import MindQueryEngine
-from mind_graph_db.storage import SQLiteDocumentStore, SQLiteGraphStore, SQLiteVectorStore
-from mind_graph_db.utils import GraphVisualizer
+from mind_graph_db.sdk import MindGraphDBClient
 
 
-def run_demo() -> None:
-    demo_dir = "./storage_demo"
+def run_sdk_demo() -> None:
+    demo_dir = "./demo_storage"
     if os.path.exists(demo_dir):
         shutil.rmtree(demo_dir)
     os.makedirs(demo_dir, exist_ok=True)
 
     print("===========================================================")
-    print("      MIND GRAPH DB - END-TO-END DEMONSTRATION")
+    print("   MIND GRAPH DB - CLIENT SDK END-TO-END DEMONSTRATION")
     print("===========================================================")
 
-    # 1. Initialize Storage & Model Components
-    doc_store = SQLiteDocumentStore(db_path=os.path.join(demo_dir, "documents.db"))
-    vec_store = SQLiteVectorStore(db_path=os.path.join(demo_dir, "vectors.db"))
-    graph_store = SQLiteGraphStore(db_path=os.path.join(demo_dir, "graph.db"))
-    embedding_model = HashEmbeddingModel(dim=128)
-    nlp_model = RuleBasedNLPModel()
+    # 1. Initialize SDK Client in local in-process mode
+    client = MindGraphDBClient(db_dir=demo_dir)
+    print("\n--- Step 1: SDK Client Initialized ---")
 
-    pipeline = DocumentIngestionPipeline(
-        document_store=doc_store,
-        vector_store=vec_store,
-        graph_store=graph_store,
-        embedding_model=embedding_model,
-        nlp_model=nlp_model,
-        min_confidence=0.5,
-    )
-
-    query_engine = MindQueryEngine(
-        document_store=doc_store,
-        vector_store=vec_store,
-        graph_store=graph_store,
-        embedding_model=embedding_model,
-    )
-
-    # 2. Ingest Multiple Documents (Step 1 - 5)
-    print("\n--- Step 1: Ingesting Documents & Auto-Building Graph ---")
-
-    doc1 = Document(
-        id="doc-1",
+    # 2. Add Rows (Create & Ingest Documents)
+    print("\n--- Step 2: Adding Rows (Document Ingestion & Auto Graph Construction) ---")
+    res1 = client.create_document(
+        doc_id="doc-1",
         text="Mind Graph DB is an open source hybrid database written in Python.",
         metadata={"category": "database", "author": "Alice"},
     )
-    doc2 = Document(
-        id="doc-2",
+    res2 = client.create_document(
+        doc_id="doc-2",
         text="Python integrates with SQLite engine for graph persistence. Google uses Python for backend services.",
         metadata={"category": "technology", "author": "Bob"},
     )
-    doc3 = Document(
-        id="doc-3",
+    res3 = client.create_document(
+        doc_id="doc-3",
         text="Mind Graph DB provides vector embeddings and semantic graph search.",
         metadata={"category": "database", "author": "Charlie"},
     )
 
-    res1 = pipeline.ingest_document(doc1)
-    res2 = pipeline.ingest_document(doc2)
-    res3 = pipeline.ingest_document(doc3)
+    print(f"Added Doc 1: Extracted {res1.entities_extracted} entities, created {res1.relationships_created} edges.")
+    print(f"Added Doc 2: Extracted {res2.entities_extracted} entities, created {res2.relationships_created} edges.")
+    print(f"Added Doc 3: Extracted {res3.entities_extracted} entities, created {res3.relationships_created} edges.")
 
-    print(f"Doc 1 Ingested: {res1.entities_extracted} entities, {res1.relationships_created} edges created.")
-    print(f"Doc 2 Ingested: {res2.entities_extracted} entities, {res2.relationships_created} edges created.")
-    print(f"Doc 3 Ingested: {res3.entities_extracted} entities, {res3.relationships_created} edges created.")
+    # 3. View Rows (Get Document by ID)
+    print("\n--- Step 3: Viewing Rows (Retrieving Documents by ID) ---")
+    doc1 = client.get_document("doc-1")
+    doc2 = client.get_document("doc-2")
 
-    # 3. Render ASCII Graph Visualization
-    print("\n--- Step 2: Knowledge Graph ASCII Visualization ---")
-    ascii_graph = GraphVisualizer.render_ascii(graph_store, seed_node_ids=["doc-1", "doc-2"], max_depth=2)
-    print(ascii_graph)
+    if doc1:
+        print(f"Fetched Doc 1 -> ID: '{doc1.id}' | Text: '{doc1.text}' | Metadata: {doc1.metadata}")
+    if doc2:
+        print(f"Fetched Doc 2 -> ID: '{doc2.id}' | Text: '{doc2.text}' | Metadata: {doc2.metadata}")
 
-    # 4. Update Document & Stale Relationship Pruning (Step 6 & 7)
-    print("\n--- Step 3: Updating Document & Reconciling Relationships ---")
+    # 4. Perform Semantic Search Across Rows
+    print("\n--- Step 4: Semantic Vector Search ---")
+    search_results = client.semantic_search(query_text="Python database", top_k=2)
+    for idx, match in enumerate(search_results, 1):
+        print(f"  {idx}. Doc ID: '{match['document_id']}' | Score: {match['score']:.4f} | Text: '{match['text']}'")
+
+    # 5. Update Rows & Reconcile Relationships
+    print("\n--- Step 5: Updating Rows (Updating Text & Metadata) ---")
     print("Updating Doc 2: Replacing 'Google' with 'OpenAI'...")
-    doc2.text = "Python integrates with SQLite engine for graph persistence. OpenAI uses Python to train AI models."
-    doc2.metadata["version"] = 2
-
-    res_update = pipeline.update_document(doc2)
-    print(f"Doc 2 Updated! Removed Edges: {res_update.relationships_removed} | Created Edges: {res_update.relationships_created} | Preserved Edges: {res_update.relationships_updated}")
-
-    # 5. Execute Domain Query (Step 8 & 9)
-    print("\n--- Step 4: Executing Domain Query with Evidence Provenance ---")
-    query_str = (
-        'FIND documents '
-        'WHERE semantic_match("Python database") AND metadata.category = "database" '
-        'TRAVERSE 2 HOPS '
-        'RETURN documents, entities, relationships'
+    res_update = client.update_document(
+        document_id="doc-2",
+        text="Python integrates with SQLite engine for graph persistence. OpenAI uses Python to train AI models.",
+        metadata={"category": "technology", "author": "Bob", "version": 2},
     )
+    print(f"Updated Doc 2: Removed {res_update.relationships_removed} obsolete edges, created {res_update.relationships_created} new edges.")
+
+    updated_doc2 = client.get_document("doc-2")
+    if updated_doc2:
+        print(f"Verified Updated Doc 2 -> Text: '{updated_doc2.text}'")
+
+    # 6. Hybrid Domain Query & Provenance Retrieval
+    print("\n--- Step 6: Hybrid Domain Query Execution ---")
+    query_str = 'FIND documents WHERE semantic_match("Python database") AND metadata.category = "database" TRAVERSE 2 HOPS RETURN documents, entities, relationships'
     print(f"Query: {query_str}")
-    query_res = query_engine.query(query_str, top_k=5)
+    query_res = client.query(query_str, top_k=5)
 
-    print(f"\nMatching Documents ({len(query_res.documents)} found):")
-    for d in query_res.documents:
-        score = query_res.scores.get(d.id, 0.0)
-        print(f"  • ID: {d.id} | Score: {score:.3f} | Text: '{d.text}'")
-
-    print(f"\nDiscovered Entity Nodes ({len(query_res.entities)} found):")
-    for e in query_res.entities:
-        print(f"  • ID: {e.id} | Name: '{e.name}' | Type: '{e.type}'")
-
-    print(f"\nTraversed Relationship Edges & Evidence Provenance ({len(query_res.relationships)} found):")
+    print(f"Matching Documents Found: {len(query_res.documents)}")
+    print(f"Entities Discovered: {len(query_res.entities)}")
+    print(f"Relationship Edges Traversed: {len(query_res.relationships)}")
     for r in query_res.relationships:
         print(f"  • Edge: '{r.source_id}' --({r.relation_type}, conf={r.confidence:.2f})--> '{r.target_id}'")
         if r.evidence_text:
             print(f"    Evidence Provenance: '{r.evidence_text}'")
 
-    doc_store.close()
-    vec_store.close()
-    graph_store.close()
+    # 7. Export Interactive HTML Graph Visualization using Client SDK
+    html_file = "examples/graph_visualization.html"
+    saved_path = client.visualize(output_html_path=html_file, auto_open=False)
+    print(f"\n--- Step 7: Visualization Exported via SDK to '{saved_path}' ---")
+
+    client.close()
     print("\n===========================================================")
-    print("      DEMONSTRATION COMPLETED SUCCESSFULLY")
+    print("      SDK DEMONSTRATION COMPLETED SUCCESSFULLY")
     print("===========================================================")
 
 
 if __name__ == "__main__":
-    run_demo()
+    run_sdk_demo()

@@ -59,7 +59,25 @@ def test_sdk_in_process_mode(tmp_path: Path) -> None:
     paths = client.traverse("sdk-doc-1", max_hops=1)
     assert isinstance(paths, list)
 
-    # 7. Delete Document
+    # 7. List and Get All documents
+    all_docs = client.get_all()
+    assert len(all_docs) == 1
+    assert all_docs[0].id == "sdk-doc-1"
+
+    listed = client.list_documents(limit=10)
+    assert len(listed) == 1
+
+    # 8. Delete Document
     deleted = client.delete_document("sdk-doc-1")
     assert deleted is True
     assert client.get_document("sdk-doc-1") is None
+    assert len(client.get_all()) == 0
+
+    # 9. Test Delete All
+    client.create_document(text="Doc A", doc_id="doc-a")
+    client.create_document(text="Doc B", doc_id="doc-b")
+    assert len(client.get_all_documents()) == 2
+
+    deleted_count = client.delete_all()
+    assert deleted_count == 2
+    assert len(client.get_all()) == 0

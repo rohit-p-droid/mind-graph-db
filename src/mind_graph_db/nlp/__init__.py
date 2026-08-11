@@ -4,6 +4,7 @@ from typing import Optional
 
 from mind_graph_db.config.settings import get_settings
 from mind_graph_db.interfaces.nlp import NLPModel
+from mind_graph_db.nlp.llm_model import LLMNLPModel
 from mind_graph_db.nlp.rule_based_model import RuleBasedNLPModel
 from mind_graph_db.nlp.spacy_model import SpacyNLPModel
 
@@ -39,5 +40,6 @@ __all__ = [
     "NLPModel",
     "RuleBasedNLPModel",
     "SpacyNLPModel",
+    "LLMNLPModel",
     "get_nlp_model",
 ]

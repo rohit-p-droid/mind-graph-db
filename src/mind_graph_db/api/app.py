@@ -41,5 +41,13 @@ def create_app(db_dir: Optional[str] = None) -> FastAPI:
     def health_check() -> Dict[str, str]:
         return {"status": "ok", "service": "Mind Graph DB"}
 
-    return app
+    @app.get("/")
+    def root() -> Dict[str, str]:
+        return {
+            "name": "Mind Graph DB API",
+            "version": "0.1.0",
+            "docs_url": "/docs",
+            "health": "/health",
+        }
 
+    return app

@@ -39,6 +39,25 @@ class TraverseRequest(BaseModel):
     max_hops: int = 2
 
 
+@router.get("/documents", response_model=List[Document])
+def list_documents(
+    limit: int = 100,
+    offset: int = 0,
+    db: DatabaseContainer = Depends(get_database),
+) -> List[Document]:
+    """Retrieve a paginated list of all stored documents."""
+    return db.document_store.list_documents(limit=limit, offset=offset)
+
+
+@router.get("/graph")
+def get_graph_data(
+    db: DatabaseContainer = Depends(get_database),
+) -> Dict[str, Any]:
+    """Retrieve live graph structure as JSON for UI visualizer."""
+    from mind_graph_db.utils import GraphVisualizer
+    return GraphVisualizer.export_json(db.graph_store)
+
+
 @router.post("/documents", response_model=IngestionResult, status_code=status.HTTP_201_CREATED)
 def create_document(
     req: CreateDocumentRequest,
@@ -94,6 +113,25 @@ def delete_document(
     db.graph_store.delete_node(document_id)
 
     return {"status": "deleted", "document_id": document_id}
+
+
+@router.delete("/documents")
+def delete_all_documents(
+    db: DatabaseContainer = Depends(get_database),
+) -> Dict[str, Any]:
+    """Delete all documents, vectors, and graph nodes in the database."""
+    docs = db.document_store.list_documents(limit=10000)
+    count = len(docs)
+    for doc in docs:
+        db.document_store.delete(doc.id)
+        db.vector_store.delete(doc.id)
+    if hasattr(db.graph_store, "clear"):
+        db.graph_store.clear()
+    else:
+        for doc in docs:
+            db.graph_store.delete_node(doc.id)
+
+    return {"status": "deleted_all", "count": count}
 
 
 @router.post("/search")
@@ -159,6 +197,16 @@ def get_relationship_evidence(
                 "properties": rel.properties,
             }
     raise HTTPException(status_code=404, detail=f"Relationship '{relationship_id}' not found.")
+
+
+@router.get("/health/graph")
+def check_graph_health(
+    db: DatabaseContainer = Depends(get_database),
+) -> Dict[str, Any]:
+    """Run automated graph health diagnostics, checking orphan nodes, provenance, and integrity."""
+    from mind_graph_db.utils.health import GraphHealthChecker
+    report = GraphHealthChecker.check_health(db.graph_store, db.document_store)
+    return report.model_dump(mode="json")
 
 
 @router.get("/visualize", response_class=HTMLResponse)

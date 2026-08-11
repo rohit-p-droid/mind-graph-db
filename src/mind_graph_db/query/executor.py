@@ -110,14 +110,30 @@ class MindQueryEngine(QueryEngine):
                         )
                     matched_relationships[edge.id] = edge
 
-        # Stage 4: Result Ranking
+        # Stage 4: Result Ranking & Explainable Reasoning Paths
         matched_documents.sort(key=lambda d: scores_map.get(d.id, 0.0), reverse=True)
+
+        reasoning_paths: List[Dict[str, Any]] = []
+        for doc in matched_documents:
+            doc_score = scores_map.get(doc.id, 0.0)
+            doc_rels = [
+                rel.model_dump(mode="json")
+                for rel in matched_relationships.values()
+                if rel.source_id == doc.id or rel.target_id == doc.id
+            ]
+            reasoning_paths.append({
+                "document_id": doc.id,
+                "relevance_score": doc_score,
+                "evidence_snippet": doc.text[:140] + ("..." if len(doc.text) > 140 else ""),
+                "supporting_relationships": doc_rels,
+            })
 
         return QueryResult(
             query=query_ast.semantic_query or query_ast.target,
             documents=matched_documents if "documents" in query_ast.return_fields else [],
             entities=list(matched_entities.values()) if "entities" in query_ast.return_fields else [],
             relationships=list(matched_relationships.values()) if "relationships" in query_ast.return_fields else [],
+            reasoning_paths=reasoning_paths,
             scores={d.id: scores_map.get(d.id, 0.0) for d in matched_documents},
             metadata={"plan_steps": [s.name for s in plan.steps]},
         )
